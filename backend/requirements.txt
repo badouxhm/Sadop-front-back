@@ -1,0 +1,13 @@
+Flask==3.0.0
+Flask-CORS==4.0.0
+Flask-SQLAlchemy==3.1.1
+pymysql==1.1.0
+python-dotenv==1.0.0
+sounddevice==0.4.6
+numpy==1.26.3
+soundfile==0.12.1
+groq==0.13.0
+librosa==0.10.1
+Werkzeug==3.0.1
+SQLAlchemy==2.0.25
+cryptography==41.0.7
