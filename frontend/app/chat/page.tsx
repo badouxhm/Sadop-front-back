@@ -15,6 +15,8 @@ import {
   getMessages, 
   AudioRecorder, 
   sendAudioMessage,
+  querySqlFromRequest,
+  sendFromModel,
   getConversations,
   createConversation,
   getConversation,
@@ -133,11 +135,10 @@ export default function ChatPage() {
 
   const loadMessagesForConversation = async (conversationId: number) => {
     try {
-      const response = await getMessages();
+      const response = await getMessages(conversationId);
       if (response.success && response.messages) {
         // Filtrer les messages pour la conversation active
         const filteredMessages = response.messages
-          .filter((msg: any) => msg.conversation_id === conversationId)
           .map((msg: any) => ({
             id: msg.id,
             role: msg.type === 'user' ? 'user' : 'assistant',
@@ -149,6 +150,18 @@ export default function ChatPage() {
     } catch (error) {
       console.error('Error loading messages:', error);
     }
+  };
+
+  const formatQueryResult = (columns: string[], rows: Array<Array<unknown>>): string => {
+    if (!columns.length) return "Aucun résultat.";
+
+    const header = columns.join(" | ");
+    const separator = columns.map(() => "---").join(" | ");
+    const body = rows
+      .map((row) => row.map((cell) => String(cell ?? "")).join(" | "))
+      .join("\n");
+
+    return `Résultat de la requête :\n${header}\n${separator}\n${body || "(aucune ligne)"}`;
   };
 
   const handleCreateNewConversation = async () => {
@@ -211,17 +224,30 @@ export default function ChatPage() {
           description: "Votre message a été envoyé avec succès",
         });
 
-        // TODO: Ici vous intégrerez la réponse de l'IA
-        // Pour l'instant, on simule une réponse
-        setTimeout(() => {
+        const sqlResponse = await querySqlFromRequest(userMessage);
+
+        if (sqlResponse.success && sqlResponse.columns && sqlResponse.rows) {
+          const formatted = formatQueryResult(sqlResponse.columns, sqlResponse.rows);
+
           setMessages((prev) => [
             ...prev,
             {
               role: "assistant",
-              content: `Analyse terminée. J'ai traité votre demande concernant "${userMessage}". Voulez-vous continuer ?`,
+              content: formatted,
             },
           ]);
-        }, 1000);
+
+          await sendFromModel(formatted, activeConversationId);
+        } else {
+          const fallbackMessage = sqlResponse.error || "Impossible d'exécuter la requête SQL.";
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              content: fallbackMessage,
+            },
+          ]);
+        }
       } else {
         toast({
           title: "Erreur",

@@ -35,7 +35,7 @@ export function MessageList({ messages, scrollRef }: MessageListProps) {
             </Avatar>
             <div
               className={cn(
-                "max-w-[80%] rounded-2xl px-4 py-3 text-sm leading-relaxed",
+                "max-w-[80%] rounded-2xl px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap",
                 msg.role === "user"
                 ? "bg-white text-black font-medium"
                 : "bg-black/10 text-white/90 border border-white/10"

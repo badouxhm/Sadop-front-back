@@ -46,7 +46,16 @@ export interface BDDFile {
 
 export interface BDDFilesResponse {
   success: boolean;
-  fichiers: BDDFile[];
+  fichier: BDDFile | null;
+  message?: string;
+}
+
+export interface QuerySqlResponse {
+  success: boolean;
+  sql_query?: string;
+  columns?: string[];
+  rows?: Array<Array<unknown>>;
+  error?: string;
 }
 
 /**
@@ -113,33 +122,16 @@ export async function sendAudioMessage(audioBlob: Blob, conversationId: number):
 }
 
 /**
- * Récupérer tous les messages
- */
-export async function getMessages(): Promise<MessagesResponse> {
-  try {
-    const response = await fetch(`${API_BASE_URL}/api/messages`);
-    const data = await response.json();
-    return data;
-  } catch (error) {
-    console.error('Error fetching messages:', error);
-    return {
-      success: false,
-      messages: [],
-    };
-  }
-}
-
-/**
  * Envoyer un message depuis le modèle IA
  */
-export async function sendFromModel(message: string): Promise<ApiResponse<Message>> {
+export async function sendFromModel(message: string, conversationId: number): Promise<ApiResponse<Message>> {
   try {
     const response = await fetch(`${API_BASE_URL}/api/send-from-model`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message, conversation_id: conversationId }),
     });
 
     const data = await response.json();
@@ -202,14 +194,58 @@ export async function uploadSQLFile(file: File): Promise<ApiResponse<BDDFile>> {
  */
 export async function getBDDFiles(): Promise<BDDFilesResponse> {
   try {
-    const response = await fetch(`${API_BASE_URL}/api/bdd/files`);
+    const response = await fetch(`${API_BASE_URL}/api/bdd/file`);
     const data = await response.json();
     return data;
   } catch (error) {
     console.error('Error fetching BDD files:', error);
     return {
       success: false,
-      fichiers: [],
+      fichier: null,
+    };
+  }
+}
+
+/**
+ * Exécuter une requête SQL générée depuis une demande utilisateur
+ */
+export async function querySqlFromRequest(userRequest: string): Promise<QuerySqlResponse> {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/query-sql`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ user_request: userRequest }),
+    });
+
+    const data = await response.json();
+    return data;
+  } catch (error) {
+    console.error('Error querying SQL:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Erreur inconnue',
+    };
+  }
+}
+
+/**
+ * Récupérer les messages (optionnellement filtrés par conversation)
+ */
+export async function getMessages(conversationId?: number): Promise<MessagesResponse> {
+  try {
+    const url = conversationId
+      ? `${API_BASE_URL}/api/messages?conversation_id=${conversationId}`
+      : `${API_BASE_URL}/api/messages`;
+    const response = await fetch(url);
+    const data = await response.json();
+    return data;
+  } catch (error) {
+    console.error('Error fetching messages:', error);
+    return {
+      success: false,
+      messages: [],
     };
   }
 }

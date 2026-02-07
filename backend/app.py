@@ -2,13 +2,16 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 import os
 import sys
 from datetime import datetime
 from utils import transcribe_audio
 import io
+from tools import generate_return_schema_for_last_sql_dump, generate_sql_direct
+import json
 
+# Ne pas exécuter d'appels réseau au chargement du module
 # Forcer l'encodage UTF-8 pour Windows
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding='utf-8')
@@ -28,6 +31,9 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max pour les fichiers SQL
 
 db = SQLAlchemy(app)
+
+# Éviter de recréer les tables à chaque requête
+_tables_initialized = False
 
 # ==================== MODÈLES ====================
 
@@ -119,8 +125,20 @@ def upload_sql():
             return jsonify({'error': 'Le fichier doit être un fichier SQL'}), 400
         
         # Lire le contenu du fichier SQL
-        sql_content = file.read().decode('utf-8')
-        file_size = len(sql_content.encode('utf-8'))
+        raw_bytes = file.read()
+        try:
+            sql_content = raw_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            try:
+                sql_content = raw_bytes.decode('latin-1')
+            except Exception:
+                sql_content = None
+
+        file_size = len(raw_bytes)
+        print(f"[DEBUG] Lecture fichier: {file.filename} bytes={file_size}")
+        if sql_content is None:
+            print("[ERROR] Impossible de décoder le fichier SQL en utf-8 ou latin-1")
+            return jsonify({'error': 'Impossible de décoder le fichier SQL. Encodage non supporté.'}), 400
         print(f"[DEBUG] Taille du fichier: {file_size} bytes")
         
         # Enregistrer le fichier dans la table bdd (SANS l'exécuter)
@@ -283,7 +301,7 @@ def create_conversation():
     Créer une nouvelle conversation
     """
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         titre = data.get('titre', 'Nouvelle Discussion')
         
         nouvelle_conversation = Conversation(titre=titre)
@@ -330,7 +348,7 @@ def update_conversation(conv_id):
         if not conversation:
             return jsonify({'error': 'Conversation introuvable'}), 404
         
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         if 'titre' in data:
             conversation.titre = data['titre']
         
@@ -369,7 +387,7 @@ def delete_conversation(conv_id):
 @app.route('/api/send-from-model', methods=['POST'])
 def send_from_model():
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
 
         if not data or 'message' not in data or 'conversation_id' not in data:
             return jsonify({
@@ -461,7 +479,11 @@ def init_test_data():
 @app.before_request
 def create_tables():
     """Créer les tables si elles n'existent pas"""
+    global _tables_initialized
+    if _tables_initialized:
+        return
     db.create_all()
+    _tables_initialized = True
 
 
 def add_missing_columns():
@@ -471,12 +493,27 @@ def add_missing_columns():
             inspector = inspect(db.engine)
             
             # Vérifier si la colonne 'contenu' existe dans la table 'bdd'
-            bdd_columns = [col['name'] for col in inspector.get_columns('bdd')]
+            bdd_cols_info = inspector.get_columns('bdd')
+            bdd_columns = [col['name'] for col in bdd_cols_info]
             if 'contenu' not in bdd_columns:
                 print("[DEBUG] Ajout de la colonne 'contenu' a la table 'bdd'...")
-                db.session.execute(db.text("ALTER TABLE bdd ADD COLUMN contenu LONGTEXT NULL"))
+                db.session.execute(text("ALTER TABLE bdd ADD COLUMN contenu LONGTEXT NULL"))
                 db.session.commit()
                 print("[SUCCESS] Colonne 'contenu' ajoutee avec succes")
+            else:
+                # Si la colonne existe mais n'est pas LONGTEXT, la convertir (protéger les données)
+                col_info = next((c for c in bdd_cols_info if c['name'] == 'contenu'), None)
+                if col_info is not None:
+                    col_type = str(col_info.get('type', '')).lower()
+                    if 'longtext' not in col_type:
+                        try:
+                            print("[DEBUG] Conversion de la colonne 'contenu' vers LONGTEXT...")
+                            db.session.execute(text("ALTER TABLE bdd MODIFY COLUMN contenu LONGTEXT NULL"))
+                            db.session.commit()
+                            print("[SUCCESS] Colonne 'contenu' convertie en LONGTEXT")
+                        except Exception as e:
+                            db.session.rollback()
+                            print(f"[WARNING] Impossible de convertir 'contenu' en LONGTEXT: {str(e)}")
             
             # Vérifier si la colonne 'conversation_id' existe dans la table 'messages'
             msg_columns = [col['name'] for col in inspector.get_columns('messages')]
@@ -489,13 +526,68 @@ def add_missing_columns():
                 default_conv_id = default_conv.id
                 
                 # Ajouter la colonne avec une valeur par défaut
-                db.session.execute(db.text(f"ALTER TABLE messages ADD COLUMN conversation_id INT NOT NULL DEFAULT {default_conv_id}"))
-                db.session.execute(db.text("ALTER TABLE messages ADD FOREIGN KEY (conversation_id) REFERENCES conversations(id)"))
+                db.session.execute(text(f"ALTER TABLE messages ADD COLUMN conversation_id INT NOT NULL DEFAULT {default_conv_id}"))
+                db.session.execute(text("ALTER TABLE messages ADD FOREIGN KEY (conversation_id) REFERENCES conversations(id)"))
                 db.session.commit()
                 print("[SUCCESS] Colonne 'conversation_id' ajoutee avec succes")
         except Exception as e:
             print(f"[WARNING] Impossible d'ajouter la colonne: {str(e)}")
 
+
+@app.route('/api/query-sql', methods=['POST'])
+def query_sql_from_user_request():
+    try:
+        data = request.get_json()
+        if not data or 'user_request' not in data:
+            return jsonify({'error': 'Le champ "user_request" est requis'}), 400
+
+        user_request = data['user_request']
+
+        # 1️⃣ Récupérer le dernier SQL dump
+        dernier_fichier = BDD.query.order_by(BDD.date_upload.desc()).first()
+        if not dernier_fichier or not dernier_fichier.contenu:
+            return jsonify({'error': 'Aucun fichier SQL valide trouvé'}), 404
+
+        sql_dump = dernier_fichier.contenu
+
+        # 2️⃣ EXTRACTION LOCALE DU SCHEMA (SANS HTTP)
+        from tools import _extract_tables_from_sql
+        extracted_schema = _extract_tables_from_sql(sql_dump)
+
+        if not extracted_schema:
+            return jsonify({'error': 'Impossible d’extraire le schema SQL'}), 500
+
+        # 3️⃣ Préparer le schema pour le LLM
+        db_schema_for_llm = json.dumps(extracted_schema, ensure_ascii=False)
+
+        # 4️⃣ Générer la requête SQL avec le LLM
+        sql_query = generate_sql_direct.invoke({
+            "db_schema": db_schema_for_llm,
+            "user_request": user_request
+        })
+
+        # 5️⃣ Exécuter la requête sur la base (lecture seule)
+        if not isinstance(sql_query, str) or not sql_query.strip():
+            return jsonify({'error': 'Requête SQL invalide'}), 500
+
+        sql_query_clean = sql_query.strip().rstrip(";")
+        if not sql_query_clean.lower().startswith("select"):
+            return jsonify({'error': 'Seules les requêtes SELECT sont autorisées'}), 400
+
+        result = db.session.execute(text(sql_query_clean))
+        rows = result.fetchall()
+        columns = list(result.keys())
+
+        return jsonify({
+            'success': True,
+            'sql_query': sql_query_clean,
+            'columns': columns,
+            'rows': [list(row) for row in rows]
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': f'Erreur: {str(e)}'}), 500
 
 if __name__ == '__main__':
     with app.app_context():
